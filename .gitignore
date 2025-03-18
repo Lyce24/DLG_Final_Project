@@ -1,2 +1,4 @@
 /data
-/models
+/data_processing/output
+/models/checkpoints
+/models/output
