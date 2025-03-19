@@ -37,3 +37,28 @@ print(patients_df.head())
 
 # save the DataFrame to a csv file
 patients_df.to_csv('../data/msk_2024_mutations__matrix.csv')
+
+
+
+# %%
+# OS_MONTHS = 'Overall_Survival_Months'
+# OS_STATUS = 'Vital_Status'
+unique_patients = patients_df.index.unique()
+patients_mapping = {}
+
+for patient in unique_patients:
+    patient_data = cb.getAllClinicalDataOfPatientInStudy(studyId='msk_chord_2024', patientId=patient)
+    temp = {}
+    for data in patient_data:
+        if data['clinicalAttributeId'] == 'OS_MONTHS':
+            temp['OS_MONTHS'] = data['value']
+        if data['clinicalAttributeId'] == 'OS_STATUS':
+            temp['OS_STATUS'] = data['value']
+    patients_mapping[patient] = temp
+        
+patients_mapping
+
+with open('../data/patients_mapping.csv', 'w') as f:
+    f.write("Patient,OS_MONTHS,OS_STATUS\n")
+    for key in patients_mapping.keys():
+        f.write(f"{key},{patients_mapping[key]['OS_MONTHS']},{patients_mapping[key]['OS_STATUS']}\n")
