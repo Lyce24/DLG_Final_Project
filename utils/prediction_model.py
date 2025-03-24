@@ -1,50 +1,32 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 # 0. MLP-Based Survival Model
 class MLP(nn.Module):
-    def __init__(self, input_dim, hidden_dim1 = 512, hidden_dim2 = 256, dropout=0.3):
+    def __init__(self, input_dim, hidden_dim1 = 128, hidden_dim2 = 64, dropout=0.3):
         super(MLP, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim1)
+        self.bn1 = nn.BatchNorm1d(hidden_dim1)
         self.dropout1 = nn.Dropout(dropout)
         self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
+        self.bn2 = nn.BatchNorm1d(hidden_dim2)
         self.dropout2 = nn.Dropout(dropout)
-        self.fc3 = nn.Linear(hidden_dim2, hidden_dim2)
-        self.dropout3 = nn.Dropout(dropout)
-        self.fc4 = nn.Linear(hidden_dim2, 1)
+        self.fc3 = nn.Linear(hidden_dim2, 1)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
+        x = self.bn1(x)
         x = self.dropout1(x)
         x = F.relu(self.fc2(x))
+        x = self.bn2(x)
         x = self.dropout2(x)
-        x = F.relu(self.fc3(x))
-        x = self.dropout3(x)
-        x = self.fc4(x)
+        x = self.fc3(x)
         return x.squeeze(-1)  # Ensure output is (batch,)
-
-# 1. CNN-Based Survival Model
-class CNNSurvival(nn.Module):
-    def __init__(self, input_dim):
-        super(CNNSurvival, self).__init__()
-        # Treat the feature vector as a 1D "image" with one channel.
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
-        self.global_pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(64, 1)
-        
-    def forward(self, x):
-        # x: (batch, input_dim)
-        x = x.unsqueeze(1)  # (batch, 1, input_dim)
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = self.global_pool(x)  # (batch, 64, 1)
-        x = x.view(x.size(0), -1)  # (batch, 64)
-        risk = self.fc(x)          # (batch, 1)
-        return risk.squeeze(-1)
-
+    
+# ---------------------------
+# Define Transformer/Self-Attention Risk Predictor
+# ---------------------------
 # 2. LSTM-Based Survival Model
 class LSTMSurvival(nn.Module):
     def __init__(self, input_dim, hidden_size=64, num_layers=1):
@@ -124,7 +106,7 @@ class ResidualBlock(nn.Module):
         return F.relu(out)
 
 class GeneRiskNet(nn.Module):
-    def __init__(self, input_dim=262, hidden_dim=256, num_residual_blocks=3, dropout_rate=0.3):
+    def __init__(self, input_dim, hidden_dim=256, num_residual_blocks=3, dropout_rate=0.3):
         super(GeneRiskNet, self).__init__()
         self.fc_in = nn.Linear(input_dim, hidden_dim)
         self.bn_in = nn.BatchNorm1d(hidden_dim)
@@ -136,3 +118,54 @@ class GeneRiskNet(nn.Module):
         x = self.res_blocks(x)
         risk = self.fc_out(x)
         return risk.squeeze(-1)  # Output shape: (batch,)
+# ---------------------------
+# Self-Attention Risk Predictor
+# ---------------------------
+class SelfAttentionRiskPredictor(nn.Module):
+    def __init__(self, input_dim=128, d_model=32):
+        """
+        Lightweight self-attention mechanism over the latent features.
+        - Each of the 128 latent features (tokens) is first projected from 1 to d_model.
+        - We then compute scaled dot-product attention over the tokens.
+        - The attended representation is aggregated (mean-pooled) and fed into a linear layer to output a risk score.
+        """
+        super(SelfAttentionRiskPredictor, self).__init__()
+        self.input_dim = input_dim
+        self.d_model = d_model
+        
+        # Project each latent scalar (token) to d_model dimensions.
+        self.token_proj = nn.Linear(1, d_model)
+        
+        # Define layers to compute query, key, value for self-attention.
+        self.query = nn.Linear(d_model, d_model)
+        self.key   = nn.Linear(d_model, d_model)
+        self.value = nn.Linear(d_model, d_model)
+        
+        # Final layer for risk score.
+        self.fc_out = nn.Linear(d_model, 1)
+        self.scale = d_model ** 0.5
+
+    def forward(self, x):
+        """
+        x: Tensor of shape (batch_size, 128)
+        """
+        batch_size = x.size(0)
+        # Treat each of the 128 latent dimensions as a token.
+        # Reshape to (batch_size, seq_len=128, token_dim=1)
+        x = x.unsqueeze(-1)
+        # Project tokens: (batch_size, 128, d_model)
+        tokens = self.token_proj(x)
+        # Compute Q, K, V
+        Q = self.query(tokens)  # (batch_size, 128, d_model)
+        K = self.key(tokens)    # (batch_size, 128, d_model)
+        V = self.value(tokens)  # (batch_size, 128, d_model)
+        # Compute scaled dot-product attention scores: (batch_size, 128, 128)
+        att_scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale
+        att_weights = torch.softmax(att_scores, dim=-1)
+        # Compute weighted sum: (batch_size, 128, d_model)
+        att_output = torch.bmm(att_weights, V)
+        # Aggregate the token representations (mean pooling)
+        agg = att_output.mean(dim=1)  # (batch_size, d_model)
+        # Compute risk score (scalar per patient)
+        risk = self.fc_out(agg)  # (batch_size, 1)
+        return risk.squeeze(1)   # (batch_size)

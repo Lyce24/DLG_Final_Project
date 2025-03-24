@@ -3,3 +3,5 @@
 /models/checkpoints
 /models/output
 /mutation_graph/output
+/draft
+/utils/model_checkpoints
