@@ -6,12 +6,14 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 import matplotlib.pyplot as plt
 import umap
-import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-from utils.prediction_model import MLP
+from utils.prediction_model import MLP, SelfAttentionSurvival
 from lifelines.utils import concordance_index
 import torch.nn.functional as F
 from sklearn.preprocessing import StandardScaler
+from lifelines import KaplanMeierFitter
+from captum.attr import IntegratedGradients
+
 
 class MultimodalDataset(Dataset):
     def __init__(self, gmp, cd_binary, cd_numeric, patient_ids=None):
@@ -55,15 +57,20 @@ class SurvivalDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx], self.time[idx], self.event[idx]
 
-def prepare_data(gene_mutations, data_labels):
+def prepare_data(gene_mutations, data_labels, cd_bin, cd_num, device='cpu'):
     # Extract patient IDs
     patient_ids = gene_mutations['Patient'].values
 
     # Get binary mutation features; convert to float32 for PyTorch
     GMP = gene_mutations.drop(columns=['Patient'])
 
-    CD_BINARY = data_labels[['highest_stage_recorded', 'CNS_BRAIN', 'LIVER', 'LUNG', 'Regional', 'Distant', 'CANCER_TYPE_BREAST', 'CANCER_TYPE_COLON', 'CANCER_TYPE_LUNG', 'CANCER_TYPE_PANCREAS', 'CANCER_TYPE_PROSTATE']]
-    CD_NUMERIC = data_labels[['CURRENT_AGE_DEID', 'TMB_NONSYNONYMOUS', 'FRACTION_GENOME_ALTERED']]
+    CD_BINARY = data_labels[cd_bin]
+    CD_NUMERIC = data_labels[cd_num]
+    
+    # Get the column names for each modality.
+    gmp_columns = GMP.columns.tolist()
+    cd_columns = CD_BINARY.columns.tolist() + CD_NUMERIC.columns.tolist()
+    all_columns = gmp_columns + cd_columns  # final feature order in X
 
     GMP = GMP.values.astype(np.float32)
     CD_BINARY = CD_BINARY.values.astype(np.float32)
@@ -96,8 +103,11 @@ def prepare_data(gene_mutations, data_labels):
     # --- Combine normalized features ---
     # The resulting cd_numeric_normalized will have the same shape as the original.
     CD_NUMERIC = np.hstack([age_normalized, tmb_normalized, frac_normalized])
+    
+    X = np.hstack([GMP, CD_BINARY, CD_NUMERIC])
+    X = torch.tensor(X, dtype=torch.float32).to(device)
 
-    return GMP, CD_BINARY, CD_NUMERIC, patient_ids
+    return GMP, CD_BINARY, CD_NUMERIC, patient_ids, all_columns, X
         
 
 def create_dataset(gmp, cd_binary, cd_numeric, patient_ids=None, batch_size=64, train_split = 0.85):
@@ -117,6 +127,7 @@ def create_dataset(gmp, cd_binary, cd_numeric, patient_ids=None, batch_size=64, 
     train_dataset, val_dataset = random_split(dataset, [n_train, n_val])
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    
     return train_loader, val_loader
 
 # NT-Xent Loss function for contrastive learning.
@@ -144,6 +155,20 @@ def nt_xent_loss(z1, z2, temperature=0.5):
     logits = similarity_matrix / temperature
     loss = F.cross_entropy(logits, targets)
     return loss
+
+def vae_training_loop(model, 
+                  train_loader, 
+                  val_loader, 
+                  num_epochs=10, 
+                  learning_rate=0.001, 
+                  pos_weight=None, 
+                  device='cpu', 
+                  training_method ='normal', 
+                  l2_lambda = 1e-4, 
+                  mask_ratio = 0.3, 
+                  noise_std = 0.1,
+                  noise_rate = 0.1):
+    pass
 
 def msaae_training_loop(model, 
                   train_loader, 
@@ -808,7 +833,7 @@ def training_loop(model,
     
         print(f"Training on device: {device}")
         print(f'Model Type: {type(model).__name__}')
-        print(f'AE Type: {ae_type}, Training Method: {training_method}, L2 Lambda: {l2_lambda}, Mask Ratio: {mask_ratio}, Noise Level: {noise_std}, Noise Rate: {noise_rate}')
+        print(f'AE Type: {ae_type}, Training Method: {training_method}, Learning Rate : {learning_rate}, L2 Lambda: {l2_lambda}, Mask Ratio: {mask_ratio}, Noise Level: {noise_std}, Noise Rate: {noise_rate}')
         
         model.to(device)
         
@@ -896,7 +921,10 @@ def generate_patient_embeddings(model,
     )
     
     model = model.to(device)
-    model.load_state_dict(best_model)
+    
+    if best_model:
+        model.load_state_dict(best_model)
+    
     model.eval()
     
     all_latent_embeddings = []
@@ -1124,6 +1152,8 @@ def downstream_performance(X,
         
     if ds_model == 'MLP':
         model = MLP(input_dim=input_dim, hidden_dim1=128, hidden_dim2=64, dropout=0.3).to(device)
+    elif ds_model == 'sa':
+        model = SelfAttentionSurvival(input_dim=input_dim, hidden_dim=128, num_heads=4, num_layers=2).to(device)
     else:
         raise ValueError(f"Unknown model type: {ds_model}")
     
@@ -1223,28 +1253,196 @@ def downstream_performance(X,
             plt.savefig(fig_save_path)
         plt.show()
     
-    model.load_state_dict(best_model) if best_model else None  # Load the best model for testing
+    if best_model:
+        model.load_state_dict(best_model)
+        
     model.eval()
+    
+    all_risk = []
+    all_time = []
+    all_event = []
+    
     with torch.no_grad():
         for test_X, test_time, test_event in test_loader:
             test_X, test_time, test_event = test_X.to(device), test_time.to(device), test_event.to(device)
             test_risk = model(test_X)  # Get risk scores for the test set
+            
             # Compute loss on the test set
             whole_loss = loss_fn(test_risk, test_time, test_event, model, l2_reg=ds_l2_reg)
+            
             # Convert log-transformed times back to original scale for c-index
-            test_risk_np = test_risk.cpu().numpy()
-            test_time_np = test_time.cpu().numpy()
-            test_event_np = test_event.cpu().numpy()
+            test_risk_np = test_risk.cpu().numpy().squeeze()    # risk scores: shape (batch,)
+            test_time_np = test_time.cpu().numpy().squeeze()      # survival times (log-transformed)
+            test_event_np = test_event.cpu().numpy().squeeze()    # event indicators
             test_time_orig = np.expm1(test_time_np)
             c_index_whole = concordance_index(test_time_orig, -test_risk_np, test_event_np)
             
+            all_risk.append(test_risk_np)
+            all_time.append(test_time_orig)
+            all_event.append(test_event_np)
+                       
+    # Concatenate predictions from all batches.
+    all_risk = np.concatenate(all_risk, axis=0)
+    all_time = np.concatenate(all_time, axis=0)
+    all_event = np.concatenate(all_event, axis=0)
+
+    # --- Stratify patients into risk groups ---
+    # Here we use the median risk score as the cutoff.
+    median_risk = np.median(all_risk)
+    group_labels = np.where(all_risk > median_risk, "High Risk", "Low Risk")
+
+    # --- Fit Kaplan-Meier curves for each group ---
+    kmf_high = KaplanMeierFitter()
+    kmf_low = KaplanMeierFitter()
+
+    high_mask = group_labels == "High Risk"
+    low_mask = group_labels == "Low Risk"
+
+    kmf_high.fit(durations=all_time[high_mask],
+                event_observed=all_event[high_mask],
+                label="High Risk")
+    kmf_low.fit(durations=all_time[low_mask],
+                event_observed=all_event[low_mask],
+                label="Low Risk")
+
+    # --- Plot the Kaplan-Meier curves ---
+    if verbose:
+        plt.figure(figsize=(10, 6))
+        ax = kmf_high.plot_survival_function(ci_show=True)
+        kmf_low.plot_survival_function(ax=ax, ci_show=True)
+        plt.xlabel("Time (Months)")
+        plt.ylabel("Survival Probability")
+        plt.title("Kaplan-Meier Curves: High Risk vs Low Risk")
+        plt.show()
+
+    # --- Optionally, print the log-rank test result to compare curves ---
+    from lifelines.statistics import logrank_test
+    results = logrank_test(all_time[high_mask], all_time[low_mask],
+                        event_observed_A=all_event[high_mask],
+                        event_observed_B=all_event[low_mask])
+    
+    print("Log-rank test p-value:", results.p_value)
     print(f"Test Loss: {whole_loss.item():.4f}, Test c-index: {c_index_whole:.4f}")
+    
     if test_results_saving_path:
         with open(test_results_saving_path, 'w') as f:
             f.write(f"Test Loss: {whole_loss.item():.4f}\n")
             f.write(f"Test c-index: {c_index_whole:.4f}\n")
-        
+            f.write(f"Log-rank test p-value: {results.p_value}\n")
+            
     # Save the model
     if model_save_path:
         torch.save(model.state_dict(), model_save_path)
-    return train_losses, val_losses, val_c_indices, c_index_whole
+    return train_losses, val_losses, val_c_indices, c_index_whole, model, best_model
+
+class IntegratedModel(nn.Module):
+    def __init__(self, ae_model, ds_model, ae_type, gmp_index):
+        super(IntegratedModel, self).__init__()
+        self.ae_model = ae_model
+        self.ds_model = ds_model
+        self.ae_type = ae_type
+        self.gmp_index = gmp_index
+        
+    def forward(self, x):
+        # If using the 'mcaae' type, split the input into two parts.
+        if self.ae_type == "mcaae":
+            latent = self.ae_model.encode(x[:, :self.gmp_index], x[:, self.gmp_index:])
+        else:
+            # For other AE types, use the encoder method.
+            latent = self.ae_model.encode(x)
+        risk_scores = self.ds_model(latent)
+        return risk_scores
+
+def interpret_model(ae_model, 
+                    ds_model, 
+                    ae_best_model, 
+                    ds_best_model, 
+                    ae_type,
+                    gmp_index,
+                    all_columns,
+                    X_test,
+                    verbose = True,
+                    sample_size = None,
+                    device='cpu'):
+    
+    # Assume ae_model, ds_model, best_model, ds_best_model, ae_type, and GMP are defined elsewhere.
+    ae_model = ae_model.to(device)
+    ds_model = ds_model.to(device)
+    
+    ae_model.load_state_dict(ae_best_model)
+    ds_model.load_state_dict(ds_best_model)
+    
+    ae_model.eval()
+    ds_model.eval()
+    
+    integrated_model = IntegratedModel(ae_model, ds_model, ae_type, gmp_index).to(device)
+    integrated_model.eval()
+    
+    # 1. Sample Output
+    sample_input = X_test[0:1]  # shape: [1, num_genes]
+    sample_input = sample_input.to(device)
+    baseline = torch.zeros_like(sample_input)
+
+    # Instantiate the IntegratedGradients object with your model.
+    ig = IntegratedGradients(integrated_model)
+
+    # Compute attributions.
+    # For regression outputs, 'target' can be set to 0 (since risk score is a single output).
+    attributions, delta = ig.attribute(sample_input,
+                                        baseline,
+                                        target=0,
+                                        return_convergence_delta=True)
+        
+    # Move attributions to CPU and convert to numpy.
+    attr_np = attributions.cpu().detach().numpy()[0]
+    # Compute absolute values and get indices of the top 20 features.
+    abs_attr = np.abs(attr_np)
+    top_indices = np.argsort(abs_attr)[::-1][:20]
+    
+    if verbose:
+        # Print the top 20 features along with their attributions.
+        print("Top 20 Features by Integrated Gradients:")
+        for idx in top_indices:
+            print(f"{all_columns[idx]}: Attribution = {attr_np[idx]:.4f}, Absolute = {abs_attr[idx]:.4f}")
+
+    # Optionally, plot the attributions of the top features.
+    top_feature_names = [all_columns[idx] for idx in top_indices]
+    top_attr_values = attr_np[top_indices]
+
+    plt.figure(figsize=(12, 6))
+    plt.barh(top_feature_names[::-1], top_attr_values[::-1])
+    plt.xlabel("Attribution Value")
+    plt.title("Top 20 Feature Attributions In One Sample")
+    plt.show()
+
+    print("Convergence Delta:", delta.item())
+    
+    all_attrs = []
+
+    num_samples = X_test.shape[0]
+    if sample_size:
+        num_samples = min(sample_size, X_test.shape[0])
+
+    for i in range(num_samples):
+        sample = X_test[i:i+1].to(device)
+        attr, _ = ig.attribute(sample, baseline, target=0, return_convergence_delta=True)
+        all_attrs.append(attr.cpu().detach().numpy()[0])
+    mean_attrs = np.mean(np.abs(np.array(all_attrs)), axis=0)
+
+    top_indices_global = np.argsort(mean_attrs)[::-1][:20]
+    
+    if verbose:
+        print("\nTop 20 global features by average absolute attribution:")
+        for idx in top_indices_global:
+            print(f"{all_columns[idx]}: Mean Abs Attribution = {mean_attrs[idx]:.4f}")
+
+    top_feature_gloabl_names = [all_columns[idx] for idx in top_indices_global]
+    top_attr_global_values = mean_attrs[top_indices_global]
+
+    plt.figure(figsize=(12, 6))
+    plt.barh(top_feature_gloabl_names[::-1], top_attr_global_values[::-1])
+    plt.xlabel("Attribution Value")
+    plt.title("Top 20 Feature Attributions Computed Across All Samples")
+    plt.show()
+
+    print("Convergence Delta:", delta.item())

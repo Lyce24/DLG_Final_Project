@@ -22,7 +22,7 @@ class MLP(nn.Module):
         x = self.bn2(x)
         x = self.dropout2(x)
         x = self.fc3(x)
-        return x.squeeze(-1)  # Ensure output is (batch,)
+        return x
     
 # ---------------------------
 # Define Transformer/Self-Attention Risk Predictor
@@ -121,51 +121,48 @@ class GeneRiskNet(nn.Module):
 # ---------------------------
 # Self-Attention Risk Predictor
 # ---------------------------
-class SelfAttentionRiskPredictor(nn.Module):
-    def __init__(self, input_dim=128, d_model=32):
-        """
-        Lightweight self-attention mechanism over the latent features.
-        - Each of the 128 latent features (tokens) is first projected from 1 to d_model.
-        - We then compute scaled dot-product attention over the tokens.
-        - The attended representation is aggregated (mean-pooled) and fed into a linear layer to output a risk score.
-        """
-        super(SelfAttentionRiskPredictor, self).__init__()
-        self.input_dim = input_dim
-        self.d_model = d_model
-        
-        # Project each latent scalar (token) to d_model dimensions.
-        self.token_proj = nn.Linear(1, d_model)
-        
-        # Define layers to compute query, key, value for self-attention.
-        self.query = nn.Linear(d_model, d_model)
-        self.key   = nn.Linear(d_model, d_model)
-        self.value = nn.Linear(d_model, d_model)
-        
-        # Final layer for risk score.
-        self.fc_out = nn.Linear(d_model, 1)
-        self.scale = d_model ** 0.5
-
+class ImprovedAttentionBlock(nn.Module):
+    """
+    Transformer-like block with:
+      1) Multi-head Self-Attention (with dropout)
+      2) Residual Connection + LayerNorm
+      3) Feed-forward Subnetwork (with GELU activation and dropout)
+      4) Another Residual Connection + LayerNorm
+    """
+    def __init__(self, embed_dim, num_heads=1, dropout=0.1, ff_hidden_multiplier=4):
+        super(ImprovedAttentionBlock, self).__init__()
+        self.mha = nn.MultiheadAttention(embed_dim=embed_dim,
+                                         num_heads=num_heads,
+                                         dropout=dropout,
+                                         batch_first=True)
+        self.dropout = nn.Dropout(dropout)
+        self.ln1 = nn.LayerNorm(embed_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, ff_hidden_multiplier * embed_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_hidden_multiplier * embed_dim, embed_dim)
+        )
+        self.ln2 = nn.LayerNorm(embed_dim)
+    
     def forward(self, x):
-        """
-        x: Tensor of shape (batch_size, 128)
-        """
-        batch_size = x.size(0)
-        # Treat each of the 128 latent dimensions as a token.
-        # Reshape to (batch_size, seq_len=128, token_dim=1)
-        x = x.unsqueeze(-1)
-        # Project tokens: (batch_size, 128, d_model)
-        tokens = self.token_proj(x)
-        # Compute Q, K, V
-        Q = self.query(tokens)  # (batch_size, 128, d_model)
-        K = self.key(tokens)    # (batch_size, 128, d_model)
-        V = self.value(tokens)  # (batch_size, 128, d_model)
-        # Compute scaled dot-product attention scores: (batch_size, 128, 128)
-        att_scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale
-        att_weights = torch.softmax(att_scores, dim=-1)
-        # Compute weighted sum: (batch_size, 128, d_model)
-        att_output = torch.bmm(att_weights, V)
-        # Aggregate the token representations (mean pooling)
-        agg = att_output.mean(dim=1)  # (batch_size, d_model)
-        # Compute risk score (scalar per patient)
-        risk = self.fc_out(agg)  # (batch_size, 1)
-        return risk.squeeze(1)   # (batch_size)
+        # Self-attention sublayer.
+        attn_output, _ = self.mha(x, x, x)
+        x = self.ln1(x + self.dropout(attn_output))
+        # Feed-forward sublayer.
+        ff_output = self.ff(x)
+        out = self.ln2(x + self.dropout(ff_output))
+        return out
+
+class SelfAttentionSurvival(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64, num_layers=2, num_heads=4):
+        super(SelfAttentionSurvival, self).__init__()
+        self.embedding = nn.Linear(input_dim, hidden_dim)
+        self.attention_blocks = nn.Sequential(*[ImprovedAttentionBlock(embed_dim=hidden_dim, num_heads=num_heads) for _ in range(num_layers)])
+        self.fc = nn.Linear(hidden_dim, 1)
+        
+    def forward(self, x):
+        x = self.embedding(x)
+        x = self.attention_blocks(x)
+        risk = self.fc(x).squeeze(-1)
+        return risk    
