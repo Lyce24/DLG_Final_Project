@@ -130,76 +130,30 @@ def create_dataset(gmp, cd_binary, cd_numeric, patient_ids=None, batch_size=64, 
     
     return train_loader, val_loader
 
-# NT-Xent Loss function for contrastive learning.
-def nt_xent_loss(z1, z2, temperature=0.5):
-    """
-    Computes the NT-Xent (Normalized Temperature-scaled Cross Entropy) loss.
-    z1, z2: projection embeddings of shape [batch_size, dim]
-    """
-    batch_size = z1.shape[0]
-    # Normalize embeddings
-    z1 = F.normalize(z1, dim=1)
-    z2 = F.normalize(z2, dim=1)
-    # Concatenate embeddings along the batch dimension: [2*batch_size, dim]
-    representations = torch.cat([z1, z2], dim=0)
-    similarity_matrix = torch.matmul(representations, representations.T)
-    
-    # Create a mask to zero out self-similarities
-    mask = torch.eye(2 * batch_size, device=z1.device).bool()
-    similarity_matrix = similarity_matrix.masked_fill(mask, -1e9)
-    
-    # Targets: for each example, the positive example is at an offset of batch_size.
-    targets = torch.arange(batch_size, 2 * batch_size, device=z1.device)
-    targets = torch.cat([targets, torch.arange(0, batch_size, device=z1.device)])
-    
-    logits = similarity_matrix / temperature
-    loss = F.cross_entropy(logits, targets)
-    return loss
-
-def vae_training_loop(model, 
-                  train_loader, 
-                  val_loader, 
-                  num_epochs=10, 
-                  learning_rate=0.001, 
-                  pos_weight=None, 
-                  device='cpu', 
-                  training_method ='normal', 
-                  l2_lambda = 1e-4, 
-                  mask_ratio = 0.3, 
-                  noise_std = 0.1,
-                  noise_rate = 0.1):
-    pass
-
-def msaae_training_loop(model, 
-                  train_loader, 
-                  val_loader, 
-                  num_epochs=10, 
-                  learning_rate=0.001, 
-                  pos_weight=None, 
-                  device='cpu', 
-                  training_method ='normal', 
-                  l2_lambda = 1e-4, 
-                  mask_ratio = 0.3, 
-                  noise_std = 0.1,
-                  noise_rate = 0.1,
-                  verbose=True):
+def ae_training_loop(model, 
+                        ae_type, # 'gmp' or 'combined'
+                        train_loader, 
+                        val_loader, 
+                        num_epochs=10, 
+                        learning_rate=0.001, 
+                        pos_weight=None, 
+                        device='cpu', 
+                        training_method ='normal', 
+                        l2_lambda = 1e-4, 
+                        mask_ratio = 0.3, 
+                        noise_std = 0.1,
+                        noise_rate = 0.1,
+                        verbose=True):
     
     if pos_weight is not None:
         recon_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # For gene mutation profile.
         bce_loss_fn     = nn.BCEWithLogitsLoss()  # For binary clinical features.
         mse_loss_fn     = nn.MSELoss()            # For numeric clinical features.
 
-        recon_criterion_none = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')  # For binary part (GMP + CD_binary)
-        bce_loss_none = nn.BCEWithLogitsLoss(reduction='none')  # For binary clinical features
-        mse_loss_none = nn.MSELoss(reduction='none')  # For numeric clinical features
     else:
         recon_criterion = nn.BCEWithLogitsLoss()
         bce_loss_fn = nn.BCEWithLogitsLoss()
         mse_loss_fn = nn.MSELoss()
-        
-        recon_criterion_none = nn.BCEWithLogitsLoss(reduction='none')
-        bce_loss_none = nn.BCEWithLogitsLoss(reduction='none')
-        mse_loss_none = nn.MSELoss(reduction='none')
         
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
@@ -226,85 +180,32 @@ def msaae_training_loop(model,
             gmp_index = x_gmp.shape[1]  # Number of features in gene mutation profile
             cd_binary_index = x_cd_binary.shape[1]  # Number of binary features
             
-            x_in = torch.cat([x_gmp, x_cd_binary, x_cd_numeric], dim=1)  # Concatenate features.
+            if ae_type == 'gmp':
+                x_in = x_gmp  # For GMP training, we only use the gene mutation profile.
+            elif ae_type == 'combined':
+                x_in = torch.cat([x_gmp, x_cd_binary, x_cd_numeric], dim=1)  # Concatenate features.
 
-            optimizer.zero_grad()
+            if training_method == 'normal':
+                recon, _, _, _ = model(x_in)  # Get the reconstructed output.
                 
-            # Forward pass.
-            if training_method == 'masked':
-                # Create a mask: positions with 1 are to be masked.
-                mask = (torch.rand(x_in.shape, device=device) < mask_ratio).float()
-                # Masked input: zero out the masked positions.
-                x_in_masked = x_in * (1 - mask)
-                
-                # Forward pass: feed the masked input to the model.
-                recon, _, _ = model(x_in_masked)  # recon has shape [batch, total_input_dim]
-                
-                # We assume the target is the original input.
-                # Define the boundaries: binary part = GMP + CD_binary, numeric part = CD_numeric.
-                target_gmp = x_gmp
-                target_cd_binary = x_cd_binary
-                target_numeric = x_cd_numeric
-                
-                # Compute the elementwise loss for the binary part.
-                loss_mat_gmp = recon_criterion_none(recon[:, :gmp_index], target_gmp)
-                loss_gmp = (loss_mat_gmp * mask[:, :gmp_index]).sum() / (mask[:, :gmp_index].sum() + 1e-8)
-                
-                loss_mat_cd_binary = bce_loss_none(recon[:, gmp_index:gmp_index + cd_binary_index], target_cd_binary)
-                loss_cd_binary = (loss_mat_cd_binary * mask[:, gmp_index:gmp_index + cd_binary_index]).sum() / (mask[:, gmp_index:gmp_index + cd_binary_index].sum() + 1e-8)
+                if ae_type == 'combined':
+                    # Compute reconstruction loss for gene mutation profile.
+                    loss_gmp = recon_criterion(recon[:, :gmp_index], x_gmp)
+                    loss_cd_binary = bce_loss_fn(recon[:, gmp_index:gmp_index + cd_binary_index], x_cd_binary)
+                    loss_cd_numeric = mse_loss_fn(recon[:, gmp_index + cd_binary_index:], x_cd_numeric)
                             
-                # Compute the elementwise loss for the numeric part.
-                loss_mat_numeric = mse_loss_none(recon[:, gmp_index + cd_binary_index:], target_numeric)
-                loss_numeric = (loss_mat_numeric * mask[:, gmp_index + cd_binary_index:]).sum() / (mask[:, gmp_index + cd_binary_index:].sum() + 1e-8)
-                
-                loss = loss_gmp + loss_cd_binary + loss_numeric
-                
-            elif training_method == 'normal':
-                recon, _, _ = model(x_in)  # Get the reconstructed output.
-                
-                # Compute reconstruction loss for gene mutation profile.
-                loss_gmp = recon_criterion(recon[:, :gmp_index], x_gmp)
-                loss_cd_binary = bce_loss_fn(recon[:, gmp_index:gmp_index + cd_binary_index], x_cd_binary)
-                loss_cd_numeric = mse_loss_fn(recon[:, gmp_index + cd_binary_index:], x_cd_numeric)
-                        
-                loss = loss_gmp + loss_cd_binary + loss_cd_numeric
-                
-            elif training_method == 'denoising':
-                # for binary, we flip the bit
-                # For GMP (binary):
-                flip_mask_gmp = (torch.rand(x_gmp.shape, device=device) < noise_rate).float()
-                # Flip bits: if original is 0, becomes 1; if 1, becomes 0.
-                x_gmp_noisy = x_gmp * (1 - flip_mask_gmp) + (1 - x_gmp) * flip_mask_gmp
-
-                # For CD_binary:
-                flip_mask_cd = (torch.rand(x_cd_binary.shape, device=device) < noise_rate).float()
-                x_cd_binary_noisy = x_cd_binary * (1 - flip_mask_cd) + (1 - x_cd_binary) * flip_mask_cd
-
-                # For numeric clinical features, add Gaussian noise.
-                noise_cd_numeric = torch.randn_like(x_cd_numeric) * noise_std
-                x_cd_numeric_noisy = x_cd_numeric + noise_cd_numeric
+                    loss = loss_gmp + loss_cd_binary + loss_cd_numeric
+                elif ae_type == 'gmp':
+                    # Compute reconstruction loss for gene mutation profile.
+                    loss = recon_criterion(recon, x_gmp)
             
-                # Concatenate the noisy features to create the noisy input.
-                x_in_noisy = torch.cat([x_gmp_noisy, x_cd_binary_noisy, x_cd_numeric_noisy], dim=1)  # Concatenate features.
-                
-                # Forward pass on the noisy input.
-                recon, _, _ = model(x_in_noisy)
-                
-                # Compute reconstruction loss on the full (clean) target.
-                loss_gmp = recon_criterion(recon[:, :gmp_index], x_gmp)
-                loss_cd_binary = bce_loss_fn(recon[:, gmp_index:gmp_index + cd_binary_index], x_cd_binary)
-                loss_cd_numeric = mse_loss_fn(recon[:, gmp_index + cd_binary_index:], x_cd_numeric)
-                
-                loss = loss_gmp + loss_cd_binary + loss_cd_numeric
-            else:
-                raise ValueError("Invalid method. Choose 'normal', 'masked', or 'denoising'.")
-    
             # compute L2 regularization
             l2_reg = 0.0
             for param in model.parameters():
                 l2_reg += torch.norm(param,2) ** 2
             loss += l2_lambda * l2_reg
-                
+            
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
                 
@@ -326,76 +227,29 @@ def msaae_training_loop(model,
                 x_gmp = batch['x_gmp'].to(device)               # Gene mutation profile.
                 x_cd_binary = batch['cd_binary'].to(device)       # [batch, 11]
                 x_cd_numeric = batch['cd_numeric'].to(device)     # [batch, 3]
-                x_in = torch.cat([x_gmp, x_cd_binary, x_cd_numeric], dim=1)  # Concatenate features.
+                
+                gmp_index = x_gmp.shape[1]  # Number of features in gene mutation profile
+                cd_binary_index = x_cd_binary.shape[1]  # Number of binary features
+                
+                if ae_type == 'gmp':
+                    x_in = x_gmp
+                elif ae_type == 'combined':
+                    x_in = torch.cat([x_gmp, x_cd_binary, x_cd_numeric], dim=1)
 
-                # Forward pass.
-                if training_method == 'masked':
-                    # Create a mask: positions with 1 are to be masked.
-                    mask = (torch.rand(x_in.shape, device=device) < mask_ratio).float()
-                    # Masked input: zero out the masked positions.
-                    x_in_masked = x_in * (1 - mask)
+                if training_method == 'normal':
+                    recon, _, _, _ = model(x_in)  # Get the reconstructed output.
                     
-                    # Forward pass: feed the masked input to the model.
-                    recon, _, _ = model(x_in_masked)  # recon has shape [batch, total_input_dim]
-                    
-                    # We assume the target is the original input.
-                    # Define the boundaries: binary part = GMP + CD_binary, numeric part = CD_numeric.
-                    target_gmp = x_gmp
-                    target_cd_binary = x_cd_binary
-                    target_numeric = x_cd_numeric
-                    
-                    # Compute the elementwise loss for the binary part.
-                    loss_mat_gmp = recon_criterion_none(recon[:, :gmp_index], target_gmp)
-                    loss_gmp = (loss_mat_gmp * mask[:, :gmp_index]).sum() / (mask[:, :gmp_index].sum() + 1e-8)
-                    
-                    loss_mat_cd_binary = bce_loss_none(recon[:, gmp_index:gmp_index + cd_binary_index], target_cd_binary)
-                    loss_cd_binary = (loss_mat_cd_binary * mask[:, gmp_index:gmp_index + cd_binary_index]).sum() / (mask[:, gmp_index:gmp_index + cd_binary_index].sum() + 1e-8)
+                    if ae_type == 'gmp':
+                        # Compute reconstruction loss for gene mutation profile.
+                        loss = recon_criterion(recon, x_gmp)
+                    elif ae_type == 'combined':
+                        # Compute reconstruction loss for gene mutation profile.
+                        loss_gmp = recon_criterion(recon[:, :gmp_index], x_gmp)
+                        loss_cd_binary = bce_loss_fn(recon[:, gmp_index:gmp_index + cd_binary_index], x_cd_binary)
+                        loss_cd_numeric = mse_loss_fn(recon[:, gmp_index + cd_binary_index:], x_cd_numeric)
                                 
-                    # Compute the elementwise loss for the numeric part.
-                    loss_mat_numeric = mse_loss_none(recon[:, gmp_index + cd_binary_index:], target_numeric)
-                    loss_numeric = (loss_mat_numeric * mask[:, gmp_index + cd_binary_index:]).sum() / (mask[:, gmp_index + cd_binary_index:].sum() + 1e-8)
-                    
-                    loss = loss_gmp + loss_cd_binary + loss_numeric
-                    
-                elif training_method == 'normal':
-                    recon, _, _ = model(x_in)  # Get the reconstructed output.
-                    
-                    # Compute reconstruction loss for gene mutation profile.
-                    loss_gmp = recon_criterion(recon[:, :gmp_index], x_gmp)
-                    loss_cd_binary = bce_loss_fn(recon[:, gmp_index:gmp_index + cd_binary_index], x_cd_binary)
-                    loss_cd_numeric = mse_loss_fn(recon[:, gmp_index + cd_binary_index:], x_cd_numeric)
-                            
-                    loss = loss_gmp + loss_cd_binary + loss_cd_numeric
-                    
-                elif training_method == 'denoising':
-                    # For GMP (binary):
-                    flip_mask_gmp = (torch.rand(x_gmp.shape, device=device) < noise_rate).float()
-                    # Flip bits: if original is 0, becomes 1; if 1, becomes 0.
-                    x_gmp_noisy = x_gmp * (1 - flip_mask_gmp) + (1 - x_gmp) * flip_mask_gmp
-
-                    # For CD_binary:
-                    flip_mask_cd = (torch.rand(x_cd_binary.shape, device=device) < noise_rate).float()
-                    x_cd_binary_noisy = x_cd_binary * (1 - flip_mask_cd) + (1 - x_cd_binary) * flip_mask_cd
-
-                    # For numeric clinical features, add Gaussian noise.
-                    noise_cd_numeric = torch.randn_like(x_cd_numeric) * noise_std
-                    x_cd_numeric_noisy = x_cd_numeric + noise_cd_numeric
-                
-                    # Concatenate the noisy features to create the noisy input.
-                    x_in_noisy = torch.cat([x_gmp_noisy, x_cd_binary_noisy, x_cd_numeric_noisy], dim=1)  # Concatenate features.
-                    
-                    # Forward pass on the noisy input.
-                    recon, _, _ = model(x_in_noisy)
-                    
-                    # Compute reconstruction loss on the full (clean) target.
-                    loss_gmp = recon_criterion(recon[:, :gmp_index], x_gmp)
-                    loss_cd_binary = bce_loss_fn(recon[:, gmp_index:gmp_index + cd_binary_index], x_cd_binary)
-                    loss_cd_numeric = mse_loss_fn(recon[:, gmp_index + cd_binary_index:], x_cd_numeric)
-                    
-                    loss = loss_gmp + loss_cd_binary + loss_cd_numeric
-                else:
-                    raise ValueError("Invalid method. Choose 'normal', 'masked', or 'denoising'.")
-                
+                        loss = loss_gmp + loss_cd_binary + loss_cd_numeric
+                   
                 # compute L2 regularization
                 l2_reg = 0.0
                 for param in model.parameters():
@@ -417,21 +271,20 @@ def msaae_training_loop(model,
                 print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
                 
     return train_losses, val_losses, best_model
-                    
-                    
-def mcaae_training_loop(model,
-                    train_loader,
-                    val_loader,
-                    num_epochs=10,
-                    learning_rate=0.001,
-                    pos_weight=None,
-                    device='cpu',
-                    training_method ='normal',
-                    l2_lambda = 1e-4,
-                    mask_ratio = 0.3,
-                    noise_std = 0.1,
-                    noise_rate = 0.1,
-                    verbose=True):
+
+def multimodal_ae_training_loop(model,
+                                train_loader,
+                                val_loader,
+                                num_epochs=10,
+                                learning_rate=0.001,
+                                pos_weight=None,
+                                device='cpu',
+                                training_method ='normal',
+                                l2_lambda = 1e-4,
+                                mask_ratio = 0.3,
+                                noise_std = 0.1,
+                                noise_rate = 0.1,
+                                verbose=True):
     
     if pos_weight is not None:
         recon_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # For gene mutation profile.
@@ -483,7 +336,7 @@ def mcaae_training_loop(model,
                 x_cd_masked = x_cd * (1 - mask_cd)
                 
                 # Forward pass on masked inputs.
-                recon_gmp, recon_cd, _ = model(x_gmp_masked, x_cd_masked)
+                recon_gmp, recon_cd, _, _ = model(x_gmp_masked, x_cd_masked)
                 
                 # For GMP: compute elementwise BCE loss and weight by mask.
                 loss_mat_gmp = recon_criterion_none(recon_gmp, x_gmp)
@@ -516,7 +369,7 @@ def mcaae_training_loop(model,
                 x_cd_noisy = torch.cat([x_cd_binary_noisy, x_cd_numeric_noisy], dim=1)
                 
                 # Forward pass on noisy inputs.
-                recon_gmp, recon_cd, _ = model(x_gmp_noisy, x_cd_noisy)
+                recon_gmp, recon_cd, _, _ = model(x_gmp_noisy, x_cd_noisy)
                 
                 # Compute reconstruction loss on clean targets.
                 loss_gmp = recon_criterion(recon_gmp, x_gmp)
@@ -526,7 +379,7 @@ def mcaae_training_loop(model,
                 
             elif training_method == 'normal':
                 # Standard autoencoder training on clean inputs.
-                recon_gmp, recon_cd, _ = model(x_gmp, x_cd)
+                recon_gmp, recon_cd, _, _ = model(x_gmp, x_cd)
                 loss_gmp = recon_criterion(recon_gmp, x_gmp)
                 loss_cd_binary = bce_loss_fn(recon_cd[:, :x_cd_binary.shape[1]], x_cd_binary)
                 loss_cd_numeric = mse_loss_fn(recon_cd[:, x_cd_binary.shape[1]:], x_cd_numeric)
@@ -574,7 +427,7 @@ def mcaae_training_loop(model,
                     x_cd_masked = x_cd * (1 - mask_cd)
                     
                     # Forward pass on masked inputs.
-                    recon_gmp, recon_cd, _ = model(x_gmp_masked, x_cd_masked)
+                    recon_gmp, recon_cd, _, _ = model(x_gmp_masked, x_cd_masked)
                     
                     # For GMP: compute elementwise BCE loss and weight by mask.
                     loss_mat_gmp = recon_criterion_none(recon_gmp, x_gmp)
@@ -607,7 +460,7 @@ def mcaae_training_loop(model,
                     x_cd_noisy = torch.cat([x_cd_binary_noisy, x_cd_numeric_noisy], dim=1)
                     
                     # Forward pass on noisy inputs.
-                    recon_gmp, recon_cd, _ = model(x_gmp_noisy, x_cd_noisy)
+                    recon_gmp, recon_cd, _, _ = model(x_gmp_noisy, x_cd_noisy)
                     
                     # Compute reconstruction loss on clean targets.
                     loss_gmp = recon_criterion(recon_gmp, x_gmp)
@@ -617,7 +470,7 @@ def mcaae_training_loop(model,
                     
                 elif training_method == 'normal':
                     # Standard autoencoder training on clean inputs.
-                    recon_gmp, recon_cd, _ = model(x_gmp, x_cd)
+                    recon_gmp, recon_cd, _, _ = model(x_gmp, x_cd)
                     loss_gmp = recon_criterion(recon_gmp, x_gmp)
                     loss_cd_binary = bce_loss_fn(recon_cd[:, :x_cd_binary.shape[1]], x_cd_binary)
                     loss_cd_numeric = mse_loss_fn(recon_cd[:, x_cd_binary.shape[1]:], x_cd_numeric)
@@ -647,178 +500,6 @@ def mcaae_training_loop(model,
             if verbose:
                 print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
 
-    return train_losses, val_losses, best_model
-
-def gmp_training_loop(model,
-                    train_loader,
-                    val_loader,
-                    num_epochs=10,
-                    learning_rate=0.001,
-                    pos_weight=None,
-                    device='cpu',
-                    training_method ='normal',
-                    l2_lambda = 1e-4,
-                    mask_ratio = 0.3,
-                    noise_std = 0.1,
-                    noise_rate = 0.1,
-                    verbose=True):
-    
-    if pos_weight is not None:
-        recon_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # For gene mutation profile.
-        recon_criterion_none = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')  # For binary part (GMP + CD_binary)
-
-    else:
-        recon_criterion = nn.BCEWithLogitsLoss()
-        recon_criterion_none = nn.BCEWithLogitsLoss(reduction='none')
-
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    
-    train_losses = []
-    val_losses = []
-    
-    best_model = None
-    best_val_loss = float('inf')
-    
-    for epoch in range(num_epochs):
-        model.train()
-        running_loss = 0.0
-        
-        for batch in train_loader:
-            # Retrieve and transfer data to device.
-            # Assume the batch is a dictionary with:
-            # - "x_gmp": [batch, input_dim_gmp]
-            # - "cd_binary": [batch, 11] and "cd_numeric": [batch, 3]
-            # - "risk_target": [batch, ...] (e.g., risk scores)
-            x_gmp = batch['x_gmp'].to(device)               # Gene mutation profile.
-            x_in = x_gmp  # For GMP training, we only use the gene mutation profile.
-
-            optimizer.zero_grad()
-                
-            # Forward pass.
-            if training_method == 'masked':
-                # Create a mask: positions with 1 are to be masked.
-                mask = (torch.rand(x_in.shape, device=device) < mask_ratio).float()
-                # Masked input: zero out the masked positions.
-                x_in_masked = x_in * (1 - mask)
-                
-                # Forward pass: feed the masked input to the model.
-                recon, _, _ = model(x_in_masked)  # recon has shape [batch, total_input_dim]
-                
-                # We assume the target is the original input.
-                # Define the boundaries: binary part = GMP + CD_binary, numeric part = CD_numeric.
-                target_gmp = x_gmp
-                
-                # Compute the elementwise loss for the binary part.
-                loss_mat_gmp = recon_criterion_none(recon, target_gmp)
-                loss = (loss_mat_gmp * mask).sum() / (mask.sum() + 1e-8)
-                
-            elif training_method == 'normal':
-                recon, _, _ = model(x_in)  # Get the reconstructed output.
-                
-                # Compute reconstruction loss for gene mutation profile.
-                loss = recon_criterion(recon, x_gmp)
-                
-            elif training_method == 'denoising':
-                # for binary, we flip the bit
-                # For GMP (binary):
-                flip_mask_gmp = (torch.rand(x_gmp.shape, device=device) < noise_rate).float()
-                # Flip bits: if original is 0, becomes 1; if 1, becomes 0.
-                x_in_noisy = x_gmp * (1 - flip_mask_gmp) + (1 - x_gmp) * flip_mask_gmp
- 
-                # Forward pass on the noisy input.
-                recon, _, _ = model(x_in_noisy)
-                
-                # Compute reconstruction loss on the full (clean) target.
-                loss = recon_criterion(recon, x_gmp)
-            else:
-                raise ValueError("Invalid method. Choose 'normal', 'masked', or 'denoising'.")
-    
-            # compute L2 regularization
-            l2_reg = 0.0
-            for param in model.parameters():
-                l2_reg += torch.norm(param,2) ** 2
-            loss += l2_lambda * l2_reg
-                
-            loss.backward()
-            optimizer.step()
-                
-            running_loss += loss.item()
-            
-        epoch_loss = running_loss / len(train_loader)
-        train_losses.append(epoch_loss)
-            
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for batch in val_loader:
-                # Retrieve and transfer data to device.
-                # Assume the batch is a dictionary with:
-                # - "x_gmp": [batch, input_dim_gmp]
-                # - "cd_binary": [batch, 11] and "cd_numeric": [batch, 3]
-                # - "risk_target": [batch, ...] (e.g., risk scores)
-                x_gmp = batch['x_gmp'].to(device)               # Gene mutation profile.
-                x_in = x_gmp
-
-                # Forward pass.
-                if training_method == 'masked':
-                    # Create a mask: positions with 1 are to be masked.
-                    mask = (torch.rand(x_in.shape, device=device) < mask_ratio).float()
-                    # Masked input: zero out the masked positions.
-                    x_in_masked = x_in * (1 - mask)
-                    
-                    # Forward pass: feed the masked input to the model.
-                    recon, _, _ = model(x_in_masked)  # recon has shape [batch, total_input_dim]
-                    
-                    # We assume the target is the original input.
-                    # Define the boundaries: binary part = GMP + CD_binary, numeric part = CD_numeric.
-                    target_gmp = x_gmp
-                    
-                    # Compute the elementwise loss for the binary part.
-                    loss_mat_gmp = recon_criterion_none(recon, target_gmp)
-                    loss = (loss_mat_gmp * mask).sum() / (mask.sum() + 1e-8)
-                    
-                elif training_method == 'normal':
-                    recon, _, _ = model(x_in)  # Get the reconstructed output.
-                    
-                    # Compute reconstruction loss for gene mutation profile.
-                    loss = recon_criterion(recon, x_gmp)
-                    
-                elif training_method == 'denoising':
-                    # for binary, we flip the bit
-                    # For GMP (binary):
-                    flip_mask_gmp = (torch.rand(x_gmp.shape, device=device) < noise_rate).float()
-                    # Flip bits: if original is 0, becomes 1; if 1, becomes 0.
-                    x_in_noisy = x_gmp * (1 - flip_mask_gmp) + (1 - x_gmp) * flip_mask_gmp
-    
-                    # Forward pass on the noisy input.
-                    recon, _, _ = model(x_in_noisy)
-                    
-                    # Compute reconstruction loss on the full (clean) target.
-                    loss = recon_criterion(recon, x_gmp)
-                else:
-                    raise ValueError("Invalid method. Choose 'normal', 'masked', or 'denoising'.")
-                    
-                # compute L2 regularization
-                l2_reg = 0.0
-                for param in model.parameters():
-                    l2_reg += torch.norm(param,2) ** 2
-                loss += l2_lambda * l2_reg
-                
-                val_loss += loss.item()
-                
-        val_loss /= len(val_loader)
-        val_losses.append(val_loss)
-        
-        if (epoch+1) % 10 == 0 and verbose:
-            print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
-            
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model = model.state_dict()
-            if verbose:
-                print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
-            
     return train_losses, val_losses, best_model
     
 def training_loop(model, 
@@ -846,23 +527,8 @@ def training_loop(model,
         model.to(device)
         
         train_losses, val_losses, best_model = [], [], None
-        if ae_type == 'msaae':
-            train_losses, val_losses, best_model= msaae_training_loop(model, 
-                                                                        train_loader, 
-                                                                        val_loader, 
-                                                                        num_epochs=num_epochs, 
-                                                                        learning_rate=learning_rate, 
-                                                                        pos_weight=pos_weight, 
-                                                                        device=device, 
-                                                                        training_method=training_method, 
-                                                                        l2_lambda=l2_lambda, 
-                                                                        mask_ratio=mask_ratio, 
-                                                                        noise_std=noise_std,
-                                                                        noise_rate=noise_rate,
-                                                                        verbose=verbose)
-
-        elif ae_type == 'mcaae':
-            train_losses, val_losses, best_model =  mcaae_training_loop(model, 
+        if ae_type == 'mm':
+            train_losses, val_losses, best_model =  multimodal_ae_training_loop(model, 
                                                                             train_loader, 
                                                                             val_loader, 
                                                                             num_epochs=num_epochs, 
@@ -875,8 +541,9 @@ def training_loop(model,
                                                                             noise_std=noise_std,
                                                                             noise_rate=noise_rate,
                                                                             verbose=verbose)
-        elif ae_type == 'gmp':
-            train_losses, val_losses, best_model =  gmp_training_loop(model,
+        else:
+            train_losses, val_losses, best_model =  ae_training_loop(model,
+                                                                        ae_type,
                                                                         train_loader, 
                                                                         val_loader, 
                                                                         num_epochs=num_epochs, 
@@ -890,8 +557,6 @@ def training_loop(model,
                                                                         noise_rate=noise_rate,
                                                                         verbose=verbose)
         
-        else:
-            raise ValueError("Invalid ae_type. Choose 'msaae', 'mcaae', or 'gmp'.")
         
         if ae_save_path:
             torch.save(best_model, ae_save_path)
@@ -949,18 +614,17 @@ def generate_patient_embeddings(model,
             x_cd_numeric = batch['cd_numeric'].to(device)
             x_cd = torch.cat([x_cd_binary, x_cd_numeric], dim=1)
             
-            if ae_type == 'msaae':
-                # For msaae, we concatenate all inputs.
+            if ae_type == 'combined':
                 x_in = torch.cat([x_gmp, x_cd_binary, x_cd_numeric], dim=1)
-                _, _, latent = model(x_in)
-            elif ae_type == 'mcaae':
-                # For mcaae, we concatenate all inputs.
-                _, _, latent = model(x_gmp, x_cd)
+                _, _, latent, _ = model(x_in)
+            elif ae_type == 'mm':
+                # For mm, we concatenate all inputs.
+                _, _, latent, _ = model(x_gmp, x_cd)
             elif ae_type == 'gmp':
                 # For gmp, we only use the gene mutation profile.
-                _, _, latent = model(x_gmp)
+                _, _, latent, _ = model(x_gmp)
             else:
-                raise ValueError("Invalid ae_type. Choose 'msaae', 'mcaae', or 'gmp'.")
+                raise ValueError("Invalid ae_type. Choose 'combined', 'mm', or 'gmp'.")
             
             all_latent_embeddings.append(latent.cpu().numpy())
             
@@ -1362,8 +1026,7 @@ class IntegratedModel(nn.Module):
         self.gmp_index = gmp_index
         
     def forward(self, x):
-        # If using the 'mcaae' type, split the input into two parts.
-        if self.ae_type == "mcaae":
+        if self.ae_type == "mm":
             latent = self.ae_model.encode(x[:, :self.gmp_index], x[:, self.gmp_index:])
         else:
             # For other AE types, use the encoder method.

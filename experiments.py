@@ -1,4 +1,3 @@
-# %%
 import numpy as np
 import pandas as pd
 import torch
@@ -11,10 +10,8 @@ from utils.ae_script import (prepare_data,
 # from utils.baseline_script import (prepare_data,run_experiment)
 import utils.baseline_script as bs
 
-from utils.autoencoder_model import (MultimodalCrossAttentionAutoencoder,
+from utils.autoencoder_model import (MultimodalAutoencoder,
                                      Autoencoder)
-
-from utils.prediction_model import MLP
 
 threshold = 15
 df = pd.read_csv(f"./data/msk_2024_fe_{threshold}.csv")
@@ -83,56 +80,49 @@ def test_baseline_model(iterations=100,
 
 ### Test The Autoencoder Model
 def test_ae_model(iterations=100,
-        batch_size = 4096,
-        ae_type='mcaae', # 'msaae', 'gmp', or 'mcaae'
-        training_method='normal', # 'normal', 'masked', or 'denoising'
-        backbone='self_attn', # 'mlp', 'residual', 'self_attn'
-        latent_dim=256,
-        hidden_dim=256,
-        num_layers=2, 
-        dropout=0.3,
-        num_heads=4, # Number of attention heads for the backbone
-        gmp_num_layers=2, # Number of layers for the GMP encoder
-        cd_num_layers=1, # Number of layers for the CD encoder
-        cross_attn_mode="shared", # "stacked" or "shared"
-        cross_attn_layers=2, # Number of cross-attention layers
-        cd_encoder_mode="attention", # "mlp" or "attention"
-        num_epochs=70, # Number of epochs for training (for autoencoder)
-        learning_rate=0.001,
-        l2_lambda=1e-4,
-        mask_ratio=0.3, # Mask ratio for masked autoencoder
-        noise_std=0.1, # Standard deviation for Gaussian noise in denoising autoencoder
-        noise_rate=0.1, # Noise rate for denoising autoencoder
-        ds_batch_size=3000, # Batch size for downstream task
-        whole_dataset=True, # True for whole dataset, False for train/val split
-        ds_model='MLP',
-        ds_epoch=100,
-        ds_lr=0.001,
-        ds_l2_reg=0.0001,
-        ae_save_path=None,
-        patient_rep_save_path=None,
-        ae_losses_plot_path=None,
-        ds_fig_save_path=None,
-        ds_test_results=None,
-        ds_model_save_path=None,
-        fig_save_path_prefix=None):
+                    batch_size = 4096,
+                    ae_type='mm', # 'mm', 'combined', or 'gmp'
+                    training_method='normal', # 'normal', 'masked', or 'denoising'
+                    backbone='self_attn', # 'mlp', 'self_attn'
+                    latent_dim=256,
+                    hidden_dim=256,
+                    num_layers=2, 
+                    dropout=0.3,
+                    num_heads=4, # Number of attention heads for the backbone
+                    gmp_num_layers=2, # Number of layers for the GMP encoder
+                    cd_num_layers=1, # Number of layers for the CD encoder
+                    fusion_mode="concat",  # "cross_attention" or "concat" or "gated"
+                    cross_attn_mode="shared", # "stacked" or "shared"
+                    cross_attn_layers=2, # Number of cross-attention layers
+                    num_epochs=70, # Number of epochs for training (for autoencoder)
+                    learning_rate=5e-4,
+                    l2_lambda=1e-4,
+                    mask_ratio=0.3, # Mask ratio for masked autoencoder
+                    noise_std=0.1, # Standard deviation for Gaussian noise in denoising autoencoder
+                    noise_rate=0.1, # Noise rate for denoising autoencoder
+                    ds_batch_size=3000, # Batch size for downstream task
+                    whole_dataset=True, # True for whole dataset, False for train/val split
+                    ds_model='MLP',
+                    ds_epoch=100,
+                    ds_lr=0.001,
+                    ds_l2_reg=0.0001):
     
     cd_bin = ['highest_stage_recorded', 'CNS_BRAIN', 'LIVER', 'LUNG', 'Regional', 'Distant', 'CANCER_TYPE_BREAST', 'CANCER_TYPE_COLON', 'CANCER_TYPE_LUNG', 'CANCER_TYPE_PANCREAS', 'CANCER_TYPE_PROSTATE']
     cd_num = ['CURRENT_AGE_DEID', 'TMB_NONSYNONYMOUS', 'FRACTION_GENOME_ALTERED']
+    
     GMP, CD_BINARY, CD_NUMERIC, patient_ids, _, _ = prepare_data(gene_mutations, data_labels, cd_bin=cd_bin, cd_num=cd_num, device=device)
     num_positives = np.sum(GMP, axis=0)  # Count the number of positive mutations for each gene
     num_negatives = GMP.shape[0] - num_positives  # Count the number of negative mutations for each gene
     pos_weight = num_negatives / (num_positives + 1e-6)  # Avoid division by zero
     pos_weight = torch.tensor(pos_weight, dtype=torch.float32).to(device)  # Move to the same device as the model
     
-
     train_loader, val_loader = create_dataset(
         GMP, CD_BINARY, CD_NUMERIC, 
         batch_size=batch_size, 
         train_split=0.85
     )
 
-    if ae_type == "msaae":
+    if ae_type == "combined":
         input_dim = GMP.shape[1] + CD_BINARY.shape[1] + CD_NUMERIC.shape[1]
     elif ae_type == "gmp":
         input_dim = GMP.shape[1]
@@ -141,23 +131,23 @@ def test_ae_model(iterations=100,
     all_metrics = []
     for i in range(iterations):
         print(f"Running experiment {i+1}...")
-        if ae_type == "mcaae":
-            model = MultimodalCrossAttentionAutoencoder(
+        if ae_type == "mm":
+            model = MultimodalAutoencoder(
                 input_dim_gmp=GMP.shape[1], 
                 input_dim_cd=CD_BINARY.shape[1] + CD_NUMERIC.shape[1],
+                backbone=backbone,
                 hidden_dim=hidden_dim,
                 latent_dim=latent_dim,
                 gmp_num_layers=gmp_num_layers, # Number of layers for the GMP encoder
                 cd_num_layers=cd_num_layers, # Number of layers for the CD encoder
                 dropout=dropout, # Dropout rate
+                fusion_mode=fusion_mode, # "cross_attention" or "concat" or "gated"
                 cross_attn_mode=cross_attn_mode, # "stacked" or "shared"
                 cross_attn_layers=cross_attn_layers, # Number of cross-attention layers
-                cd_encoder_mode=cd_encoder_mode, # "mlp" or "attention"
-                gmp_use_pos=True, # Whether to use positional encoding for GMP
-                gmp_tokens=1 # Number of tokens for GMP (1 for single token - default)
+                cd_encoder_mode=backbone
             ).to(device)
             
-        elif ae_type == "msaae" or ae_type == "gmp":
+        elif ae_type == "combined" or ae_type == "gmp":
             model = Autoencoder(
                 input_dim=input_dim, 
                 latent_dim=latent_dim, 
@@ -170,9 +160,9 @@ def test_ae_model(iterations=100,
                 num_tokens=1  # Number of tokens (1 for single token - default)
             ).to(device)
         else:
-            raise ValueError("Invalid model type. Choose 'msaae', 'gmp', or 'mcaae'.")
+            raise ValueError("Invalid model type. Choose 'mm', 'gmp', or 'combined'.")
         
-        print(f"Testing model ({ae_type}) with training method ({training_method})...")
+        print(f"Testing model (ae_type = {ae_type}, training_method = {training_method}, backbone = {backbone}, fusion_mode = {fusion_mode}, cross_attn_mode = {cross_attn_mode}, cross_attn_layers = {cross_attn_layers}, cd_num_layers = {cd_num_layers})")
         
         _, _, best_model = training_loop(
                 model = model,
@@ -188,8 +178,8 @@ def test_ae_model(iterations=100,
                 mask_ratio = mask_ratio,
                 noise_std = noise_std,
                 noise_rate = noise_rate,
-                ae_save_path = ae_save_path,
-                ae_losses_plot_path = ae_losses_plot_path,
+                ae_save_path = None,
+                ae_losses_plot_path = None,
                 verbose=False
         )
 
@@ -203,13 +193,12 @@ def test_ae_model(iterations=100,
             device = device,
             latent_dim = latent_dim,
             patient_ids = patient_ids,
-            save_path = patient_rep_save_path
+            save_path = None
         )
 
-        # %%
         y_os = data_labels['OS_MONTHS']
         y_status = data_labels['OS_STATUS']
-        input_dim = latent_df.shape[1]
+        ds_input_dim = latent_df.shape[1]
         _, _, _, c_index_whole, _, _ = downstream_performance(latent_df,
                                                         y_os, 
                                                         y_status,
@@ -218,12 +207,12 @@ def test_ae_model(iterations=100,
                                                         whole_dataset,
                                                         ds_model,
                                                         ds_epoch,
-                                                        input_dim,
+                                                        ds_input_dim,
                                                         ds_lr,
                                                         ds_l2_reg,
-                                                        ds_fig_save_path,
-                                                        ds_test_results,
-                                                        ds_model_save_path,
+                                                        None,
+                                                        None,
+                                                        None,
                                                         verbose=False)
         all_metrics.append(c_index_whole)
     
@@ -232,7 +221,7 @@ def test_ae_model(iterations=100,
     std_c_index = np.std(all_metrics)
     sem_c_index = std_c_index / np.sqrt(len(all_metrics))
     
-    file_path = f"./results/tests/{ae_type}_{training_method}_{backbone}_{ds_model}.csv"
+    file_path = f"./results/tests/{ae_type}_{training_method}_{backbone}_{fusion_mode}_{cross_attn_mode}_{cross_attn_layers}_{cd_num_layers}_{ds_model}.csv"
     with open(file_path, 'w') as f:
         f.write(f"Mean C-Index: {mean_c_index}\n")
         f.write(f"Std C-Index: {std_c_index}\n")
@@ -242,75 +231,59 @@ def test_ae_model(iterations=100,
 
 if __name__ == "__main__":
     # Test the baseline model
-    test_baseline_model(
-        iterations=100,
-        ds_model='MLP',
-        ds_epoch=100,
-        ds_lr=0.001,
-        ds_l2_reg=1e-4,
-        save_path ="./results/tests/bs_model_mlp.csv"
-    )
+    # test_baseline_model(
+    #     iterations=100,
+    #     ds_model='MLP',
+    #     ds_epoch=100,
+    #     ds_lr=0.001,
+    #     ds_l2_reg=1e-4,
+    #     save_path ="./results/tests/bs_model_mlp.csv"
+    # )
     
-    # for ae_type in ['msaae', 'gmp', 'mcaae']:
-    #     for training_method in ['normal', 'denoising', 'masked']:
-    #         test_ae_model(
-    #             iterations=100,
-    #             batch_size=4096,
-    #             ae_type=ae_type,
-    #             training_method=training_method,
-    #             backbone='self_attn',
-    #             latent_dim=256,
-    #             hidden_dim=256,
-    #             num_layers=2, 
-    #             dropout=0.3,
-    #             num_heads=4, # Number of attention heads for the backbone
-    #             gmp_num_layers=2, # Number of layers for the GMP encoder
-    #             cd_num_layers=1, # Number of layers for the CD encoder
-    #             cross_attn_mode="shared", # "stacked" or "shared"
-    #             cross_attn_layers=2, # Number of cross-attention layers
-    #             cd_encoder_mode="attention", # "mlp" or "attention"
-    #             num_epochs=70, # Number of epochs for training (for autoencoder)
-    #             learning_rate=0.001,
-    #             l2_lambda=1e-4,
-    #             mask_ratio=0.3, # Mask ratio for masked autoencoder
-    #             noise_std=0.1, # Standard deviation for Gaussian noise in denoising autoencoder
-    #             noise_rate=0.1, # Noise rate for denoising autoencoder
-    #             ds_batch_size=3000, # Batch size for downstream task
-    #             whole_dataset=True, # True for whole dataset, False for train/val split
-    #             ds_model='MLP',
-    #             ds_epoch=100,
-    #             ds_lr=0.001,
-    #             ds_l2_reg=0.0001,
-    #         )
-            
-    # for ae_type in ['msaae', 'gmp']:
-    #     for training_method in ['normal', 'denoising', 'masked']:
-    #         test_ae_model(
-    #             iterations=100,
-    #             batch_size=4096,
-    #             ae_type=ae_type,
-    #             training_method=training_method,
-    #             backbone='mlp',
-    #             latent_dim=256,
-    #             hidden_dim=256,
-    #             num_layers=2, 
-    #             dropout=0.3,
-    #             num_heads=4, # Number of attention heads for the backbone
-    #             gmp_num_layers=2, # Number of layers for the GMP encoder
-    #             cd_num_layers=1, # Number of layers for the CD encoder
-    #             cross_attn_mode="shared", # "stacked" or "shared"
-    #             cross_attn_layers=2, # Number of cross-attention layers
-    #             cd_encoder_mode="attention", # "mlp" or "attention"
-    #             num_epochs=70, # Number of epochs for training (for autoencoder)
-    #             learning_rate=0.001,
-    #             l2_lambda=1e-4,
-    #             mask_ratio=0.3, # Mask ratio for masked autoencoder
-    #             noise_std=0.1, # Standard deviation for Gaussian noise in denoising autoencoder
-    #             noise_rate=0.1, # Noise rate for denoising autoencoder
-    #             ds_batch_size=3000, # Batch size for downstream task
-    #             whole_dataset=True, # True for whole dataset, False for train/val split
-    #             ds_model='MLP',
-    #             ds_epoch=100,
-    #             ds_lr=0.001,
-    #             ds_l2_reg=0.0001,
-    #         )
+    for backbone in ['mlp', 'self_attn']:
+        for ae_type in ['combined', 'gmp']:
+            test_ae_model(
+                iterations=100,
+                ae_type=ae_type,
+                training_method='normal',
+                backbone=backbone,
+                hidden_dim=512,
+                num_layers=2,
+                dropout=0.3,
+                num_epochs=70, # Number of epochs for training (for autoencoder)
+                learning_rate=5e-4,
+                l2_lambda=1e-4,
+                whole_dataset=True, # True for whole dataset, False for train/val split
+                ds_model='MLP',
+                ds_epoch=100,
+                ds_lr=0.001,
+                ds_l2_reg=0.0001
+            )
+    
+    for training_method in ['normal', 'denoising', 'masked']:
+        for backbone in ['mlp', 'self_attn']:
+            for fusion_mode in ['cross_attention', 'concat']:
+                test_ae_model(
+                    iterations=100,
+                    ae_type='mm',
+                    training_method=training_method,
+                    backbone=backbone,
+                    hidden_dim=512,
+                    fusion_mode=fusion_mode
+                )
+                
+    for training_method in ['normal', 'denoising', 'masked']:
+        for cd_layers in [1, 2]:
+            for cross_attn_mode in ['stacked', 'shared']:
+                for cross_attn_layers in [1, 2]:
+                    test_ae_model(
+                        iterations=100,
+                        ae_type='mm',
+                        training_method=training_method,
+                        backbone='self_attn',
+                        hidden_dim=512,
+                        fusion_mode='cross_attention',
+                        cd_num_layers=cd_layers,
+                        cross_attn_mode=cross_attn_mode,
+                        cross_attn_layers=cross_attn_layers
+                    )
