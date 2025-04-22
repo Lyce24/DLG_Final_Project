@@ -181,7 +181,8 @@ def msaae_training_loop(model,
                   l2_lambda = 1e-4, 
                   mask_ratio = 0.3, 
                   noise_std = 0.1,
-                  noise_rate = 0.1):
+                  noise_rate = 0.1,
+                  verbose=True):
     
     if pos_weight is not None:
         recon_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # For gene mutation profile.
@@ -406,14 +407,15 @@ def msaae_training_loop(model,
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
         
-        if (epoch+1) % 10 == 0:
+        if (epoch+1) % 10 == 0 and verbose:
             print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
             
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model = model.state_dict()
-            print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
-
+            if verbose:
+                print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
+                
     return train_losses, val_losses, best_model
                     
                     
@@ -428,7 +430,8 @@ def mcaae_training_loop(model,
                     l2_lambda = 1e-4,
                     mask_ratio = 0.3,
                     noise_std = 0.1,
-                    noise_rate = 0.1):
+                    noise_rate = 0.1,
+                    verbose=True):
     
     if pos_weight is not None:
         recon_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # For gene mutation profile.
@@ -635,13 +638,14 @@ def mcaae_training_loop(model,
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
         
-        if (epoch+1) % 10 == 0:
+        if (epoch+1) % 10 == 0 and verbose:
             print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
             
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model = model.state_dict()
-            print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
+            if verbose:
+                print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
 
     return train_losses, val_losses, best_model
 
@@ -656,7 +660,9 @@ def gmp_training_loop(model,
                     l2_lambda = 1e-4,
                     mask_ratio = 0.3,
                     noise_std = 0.1,
-                    noise_rate = 0.1):
+                    noise_rate = 0.1,
+                    verbose=True):
+    
     if pos_weight is not None:
         recon_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # For gene mutation profile.
         recon_criterion_none = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')  # For binary part (GMP + CD_binary)
@@ -804,13 +810,14 @@ def gmp_training_loop(model,
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
         
-        if (epoch+1) % 10 == 0:
+        if (epoch+1) % 10 == 0 and verbose:
             print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
             
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model = model.state_dict()
-            print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
+            if verbose:
+                print(f"Best model updated at epoch {epoch+1} with val loss: {val_loss:.4f}")
             
     return train_losses, val_losses, best_model
     
@@ -831,9 +838,10 @@ def training_loop(model,
                   ae_losses_plot_path=None,
                   verbose=True):
     
-        print(f"Training on device: {device}")
-        print(f'Model Type: {type(model).__name__}')
-        print(f'AE Type: {ae_type}, Training Method: {training_method}, Learning Rate : {learning_rate}, L2 Lambda: {l2_lambda}, Mask Ratio: {mask_ratio}, Noise Level: {noise_std}, Noise Rate: {noise_rate}')
+        if verbose:
+            print(f"Training on device: {device}")
+            print(f'Model Type: {type(model).__name__}')
+            print(f'AE Type: {ae_type}, Training Method: {training_method}, Learning Rate : {learning_rate}, L2 Lambda: {l2_lambda}, Mask Ratio: {mask_ratio}, Noise Level: {noise_std}, Noise Rate: {noise_rate}')
         
         model.to(device)
         
@@ -850,7 +858,8 @@ def training_loop(model,
                                                                         l2_lambda=l2_lambda, 
                                                                         mask_ratio=mask_ratio, 
                                                                         noise_std=noise_std,
-                                                                        noise_rate=noise_rate)
+                                                                        noise_rate=noise_rate,
+                                                                        verbose=verbose)
 
         elif ae_type == 'mcaae':
             train_losses, val_losses, best_model =  mcaae_training_loop(model, 
@@ -864,7 +873,8 @@ def training_loop(model,
                                                                             l2_lambda=l2_lambda, 
                                                                             mask_ratio=mask_ratio, 
                                                                             noise_std=noise_std,
-                                                                            noise_rate=noise_rate)
+                                                                            noise_rate=noise_rate,
+                                                                            verbose=verbose)
         elif ae_type == 'gmp':
             train_losses, val_losses, best_model =  gmp_training_loop(model,
                                                                         train_loader, 
@@ -877,8 +887,9 @@ def training_loop(model,
                                                                         l2_lambda=l2_lambda, 
                                                                         mask_ratio=mask_ratio, 
                                                                         noise_std=noise_std,
-                                                                        noise_rate=noise_rate)
-
+                                                                        noise_rate=noise_rate,
+                                                                        verbose=verbose)
+        
         else:
             raise ValueError("Invalid ae_type. Choose 'msaae', 'mcaae', or 'gmp'.")
         
@@ -898,7 +909,8 @@ def training_loop(model,
             if ae_losses_plot_path:
                 plt.savefig(ae_losses_plot_path)
             plt.show()
-            
+        
+        print(f"Training completed. Best validation loss: {min(val_losses):.4f}")
         return train_losses, val_losses, best_model
     
 def generate_patient_embeddings(model, 
@@ -1145,11 +1157,12 @@ def downstream_performance(X,
     else:
         train_loader, val_loader, test_loader = construct_ds_loaders(X, y_os, y_status, batch_size=ds_batch_size, whole_dataset=False)
     
-    if whole_dataset:
-        print(f"Training on {len(X_train)} samples, validating on {len(val_loader.dataset)} samples, testing on {len(test_loader.dataset)} samples.")
-    else:
-        print(f"Training on {len(train_loader.dataset)} samples, validating on {len(val_loader.dataset)} samples, testing on {len(test_loader.dataset)} samples.")
-        
+    if verbose:
+        if whole_dataset:
+            print(f"Training on {len(X_train)} samples, validating on {len(val_loader.dataset)} samples, testing on {len(test_loader.dataset)} samples.")
+        else:
+            print(f"Training on {len(train_loader.dataset)} samples, validating on {len(val_loader.dataset)} samples, testing on {len(test_loader.dataset)} samples.")
+            
     if ds_model == 'MLP':
         model = MLP(input_dim=input_dim, hidden_dim1=128, hidden_dim2=64, dropout=0.3).to(device)
     elif ds_model == 'sa':
@@ -1168,17 +1181,20 @@ def downstream_performance(X,
     best_val_loss = float('inf')
     best_c_index = 0.0
     
-    print(f"Starting training for {ds_epoch} epochs...")
+    if verbose:
+        print(f"Starting training for {ds_epoch} epochs...")
+        
     for epoch in range(ds_epoch):
         model.train()
         epoch_loss = 0.0
         model.train()
-        optimizer.zero_grad()  # Clear previous gradients
 
         if whole_dataset:
             # Convert tensors to DataLoader
             risk_scores = model(X_train)
             loss = loss_fn(risk_scores, y_os_train, y_status_train, model, l2_reg=ds_l2_reg)
+            
+            optimizer.zero_grad()
             loss.backward()  # Backpropagation
             optimizer.step()
             epoch_loss = loss.item()
@@ -1187,10 +1203,10 @@ def downstream_performance(X,
             running_loss = 0.0
             for x_batch, y_os_batch, y_status_batch in train_loader:
                 x_batch, y_os_batch, y_status_batch = x_batch.to(device), y_os_batch.to(device), y_status_batch.to(device)
-                
-                optimizer.zero_grad()
                 risk_scores = model(x_batch)
                 loss = loss_fn(risk_scores, y_os_batch, y_status_batch, model, l2_reg=ds_l2_reg)
+                
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 running_loss += loss.item()
@@ -1218,14 +1234,15 @@ def downstream_performance(X,
                 c_index = concordance_index(val_time_orig, -val_risk_np, event_observed=val_events_np)
                 val_c_indices.append(c_index)
                 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 10 == 0 and verbose:
             print(f"Epoch {epoch + 1}/{ds_epoch}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}, C-Index: {c_index:.4f}")
             
         if val_loss < best_val_loss and c_index > best_c_index:
             best_val_loss = val_loss
             best_c_index = c_index
             best_model = model.state_dict()
-            print(f"New best model found at epoch {epoch + 1} with validation loss: {best_val_loss:.4f} and C-Index: {best_c_index:.4f}")
+            if verbose:
+                print(f"New best model found at epoch {epoch + 1} with validation loss: {best_val_loss:.4f} and C-Index: {best_c_index:.4f}")
         
     print(f"Training completed. Best Validation Loss: {min(val_losses):.4f}, Best C-Index: {max(val_c_indices):.4f}")
     
@@ -1333,6 +1350,7 @@ def downstream_performance(X,
     # Save the model
     if model_save_path:
         torch.save(model.state_dict(), model_save_path)
+        
     return train_losses, val_losses, val_c_indices, c_index_whole, model, best_model
 
 class IntegratedModel(nn.Module):
