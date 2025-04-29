@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 # 0. MLP-Based Survival Model
 class MLP(nn.Module):
