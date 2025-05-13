@@ -1,3 +1,0 @@
-Test Loss: 7.2704
-Test c-index: 0.7295
-Test AUROC: 0.7891

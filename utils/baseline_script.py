@@ -27,6 +27,77 @@ class SurvivalDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx], self.time[idx], self.event[idx]
 
+def prepare_binary_data(gene_mutations, cd_features, data_labels, device='cpu', batch_size=3000, whole_dataset=False):
+    if 'Patient' in gene_mutations.columns:
+        gene_mutations = gene_mutations.drop(columns=['Patient'], axis=1)
+    else:
+        pass
+
+    # Get binary mutation features; convert to float32 for PyTorch
+    GMP = gene_mutations
+
+    CD_BINARY = data_labels[cd_features]
+    
+    # Get the column names for each modality.
+    gmp_columns = gene_mutations.columns.tolist()
+    cd_columns = CD_BINARY.columns.tolist()
+    all_columns = gmp_columns + cd_columns  # final feature order in X
+    
+    GMP = GMP.values.astype(np.float32)
+    CD_BINARY = CD_BINARY.values.astype(np.float32)
+
+    CD = CD_BINARY
+    X = np.hstack([GMP, CD])  # Combine gene mutations and clinical data (GMP, CD_BINARY, CD_NUMERIC)
+
+    y_os = data_labels["OS_MONTHS"].values  # Overall survival time
+    y_status = data_labels["OS_STATUS"].values  # Overall survival status (0 = alive (censored), 1 = dead (event))
+
+    # Train-Validation-Test Split
+    X_train, X_temp, y_os_train, y_os_temp, y_status_train, y_status_temp = train_test_split(
+        X, y_os, y_status, test_size=0.3
+    )
+    X_val, X_test, y_os_val, y_os_test, y_status_val, y_status_test = train_test_split(
+        X_temp, y_os_temp, y_status_temp, test_size=0.5
+    )
+
+    # Convert to PyTorch tensors
+    X_train, y_os_train, y_status_train = map(torch.tensor, (X_train, y_os_train, y_status_train))
+    X_val, y_os_val, y_status_val = map(torch.tensor, (X_val, y_os_val, y_status_val))
+    X_test, y_os_test, y_status_test = map(torch.tensor, (X_test, y_os_test, y_status_test))
+
+    # Move to float tensors
+    X_train, X_val, X_test = X_train.float(), X_val.float(), X_test.float()
+    y_os_train, y_os_val, y_os_test = y_os_train.float(), y_os_val.float(), y_os_test.float()
+    y_status_train, y_status_val, y_status_test = y_status_train.float(), y_status_val.float(), y_status_test.float()
+
+    print(f"Train Size: {X_train.shape}, Validation Size: {X_val.shape}, Test Size: {X_test.shape}")
+
+    X_train, y_os_train, y_status_train = X_train.to(device), y_os_train.to(device), y_status_train.to(device)
+    X_val, y_os_val, y_status_val = X_val.to(device), y_os_val.to(device), y_status_val.to(device)
+    X_test, y_os_test, y_status_test = X_test.to(device), y_os_test.to(device), y_status_test.to(device)
+
+    # normalize the y_os_train, y_os_val, y_os_test using log1p
+    y_os_train = torch.log1p(y_os_train)
+    y_os_val = torch.log1p(y_os_val)
+    y_os_test = torch.log1p(y_os_test)
+    
+    # Create dataset objects
+    train_dataset = SurvivalDataset(X_train, y_os_train, y_status_train)
+    val_dataset   = SurvivalDataset(X_val, y_os_val, y_status_val)
+    test_dataset  = SurvivalDataset(X_test, y_os_test, y_status_test)
+
+    # Create DataLoaders
+    if whole_dataset:
+        # For whole dataset, we use a single batch
+        train_loader = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False)
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    # For validation and test we use full batches (since they are smaller)
+    val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False)
+    
+    return train_loader, val_loader, test_loader, X_train.shape, all_columns
+
 def prepare_data(gene_mutations, data_labels, device='cpu', batch_size=3000, whole_dataset=False):
     if 'Patient' in gene_mutations.columns:
         gene_mutations = gene_mutations.drop(columns=['Patient'], axis=1)

@@ -7,3 +7,6 @@
 /utils/model_checkpoints
 /output
 /model_checkpoints
+*/__pycache__
+
+/results/trash

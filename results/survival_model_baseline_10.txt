@@ -1,2 +1,0 @@
-Test Loss: 7.6284
-Test c-index: 0.7137
