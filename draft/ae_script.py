@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import umap
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-from prediction_model import MLP
+from models.prediction_model import MLP
 
 
 def extract_patientids(df):

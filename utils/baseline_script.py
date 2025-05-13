@@ -7,12 +7,32 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import matplotlib.pyplot as plt
 import umap
 from sklearn.model_selection import train_test_split
-from utils.prediction_model import MLP, SelfAttentionSurvival
 from lifelines.utils import concordance_index
 import torch.nn.functional as F
 from sklearn.preprocessing import StandardScaler
 from lifelines import KaplanMeierFitter
 from captum.attr import IntegratedGradients
+
+class MLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim1 = 128, hidden_dim2 = 64, dropout=0.3):
+        super(MLP, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim1)
+        self.bn1 = nn.BatchNorm1d(hidden_dim1)
+        self.dropout1 = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
+        self.bn2 = nn.BatchNorm1d(hidden_dim2)
+        self.dropout2 = nn.Dropout(dropout)
+        self.fc3 = nn.Linear(hidden_dim2, 1)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = self.bn1(x)
+        x = self.dropout1(x)
+        x = F.relu(self.fc2(x))
+        x = self.bn2(x)
+        x = self.dropout2(x)
+        x = self.fc3(x)
+        return x
     
 # Custom Dataset for Survival Data
 class SurvivalDataset(Dataset):
@@ -292,8 +312,6 @@ def run_experiment(train_loader,
     """
     if ds_model == 'MLP':
         model = MLP(input_dim=input_dim, hidden_dim1=128, hidden_dim2=64, dropout=0.3).to(device)
-    elif ds_model == 'SA':
-        model = SelfAttentionSurvival(input_dim=input_dim, hidden_dim=128, num_heads=4, num_layers=2).to(device)
     else:
         raise ValueError(f"Unknown model type: {ds_model}")
     
